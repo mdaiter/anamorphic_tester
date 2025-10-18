@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "anamorph_fit"
+version = "0.1.0"
+description = "Optical analysis utilities for anamorphic fitting."
+authors = ["Your Name <you@example.com>"]
+packages = [{ include = "anamorph_fit" }]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+numpy = "^1.26.0"
+scipy = "^1.11.0"
+pandas = "^2.1.0"
+pydantic = "^2.5.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+
+[tool.poetry.extras]
+csv = ["pandas"]
+plot = ["matplotlib"]
+
+[tool.poetry.scripts]
+anamorph-fit = "anamorph_fit.cli:main"
+
+[build-system]
+requires = ["poetry-core>=1.6.0"]
+build-backend = "poetry.core.masonry.api"
