@@ -113,14 +113,19 @@ class QuadoaClient:
             url = urljoin(self.base_url.rstrip("/") + "/", endpoint.lstrip("/"))
             req = Request(url, headers={"Accept": "application/json"})
             with urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                metadata = json.loads(resp.read().decode("utf-8"))
+                if "system" in metadata:
+                    metadata = metadata["system"]
+                return metadata
 
         base = self._base_path or Path(".")
         path = base / f"{lens_id}_system.json"
         if not path.exists():
             path = base / "system" / f"{lens_id}.json"
         metadata = json.loads(path.read_text(encoding="utf-8"))
-        metadata.setdefault("metadata", {})["source"] = str(path)
+        if "system" in metadata:
+            metadata = metadata["system"]
+        metadata.setdefault("source", str(path))
         return metadata
 
     # ------------------------------------------------------------ normalisers
@@ -163,15 +168,21 @@ class QuadoaClient:
 
         if opd.ndim == 2:
             ny, nx = opd.shape
-            if x.size == nx and y.size == ny:
-                pass
-            else:
-                if x.size == 0:
+            if x.size != nx:
+                if x.size > 1:
+                    x = np.linspace(float(np.min(x)), float(np.max(x)), nx)
+                else:
                     x = np.linspace(-1.0, 1.0, nx)
-                if y.size == 0:
+            if y.size != ny:
+                if y.size > 1:
+                    y = np.linspace(float(np.min(y)), float(np.max(y)), ny)
+                else:
                     y = np.linspace(-1.0, 1.0, ny)
-
-        x_grid, y_grid, opd_grid = QuadoaClient._resample_grid(x, y, opd)
+            x_grid = np.asarray(x, dtype=float)
+            y_grid = np.asarray(y, dtype=float)
+            opd_grid = np.asarray(opd, dtype=float)
+        else:
+            x_grid, y_grid, opd_grid = QuadoaClient._resample_grid(x, y, opd)
 
         metadata = dict(meta)
         metadata.setdefault("units", units)
@@ -194,8 +205,15 @@ class QuadoaClient:
         if opd.ndim == 2 and x.ndim == 1 and y.ndim == 1 and opd.shape == (y.size, x.size):
             return x, y, opd
 
-        flat_x = np.asarray(x).ravel()
-        flat_y = np.asarray(y).ravel()
+        x_arr = np.asarray(x)
+        y_arr = np.asarray(y)
+        if x_arr.ndim == 1 and y_arr.ndim == 1 and opd.size == x_arr.size * y_arr.size:
+            gx, gy = np.meshgrid(x_arr, y_arr, indexing="xy")
+            flat_x = gx.ravel()
+            flat_y = gy.ravel()
+        else:
+            flat_x = x_arr.reshape(-1)
+            flat_y = y_arr.reshape(-1)
         flat_opd = opd.reshape(-1)
 
         grid_x = np.linspace(flat_x.min(), flat_x.max(), int(math.sqrt(flat_x.size)) or 32)
