@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import Sequence
 
+import math
+
 import numpy as np
 from scipy.linalg import lstsq
 
@@ -25,6 +27,7 @@ class FitResult:
     names: list[str]
     values: np.ndarray
     rms_error: float
+    metrics: dict[str, float]
 
 
 def fit_aberrations_full(
@@ -57,7 +60,14 @@ def fit_aberrations_full(
     residual = target - design @ coeffs
     rms = float(np.sqrt(np.mean(residual**2)))
 
-    return FitResult(names=list(ABERRATION_NAMES), values=coeffs, rms_error=rms)
+    metrics = _compute_fit_metrics(terms, coeffs, rms)
+
+    return FitResult(
+        names=list(ABERRATION_NAMES),
+        values=coeffs,
+        rms_error=rms,
+        metrics=metrics,
+    )
 
 
 # Backwards-compatible alias for previous API name.
@@ -103,3 +113,40 @@ def _prepare_grids(
     x_grid, y_grid = np.broadcast_arrays(x_arr, y_arr)
     w_grid = np.broadcast_to(w_arr, x_grid.shape)
     return x_grid, y_grid, w_grid
+
+
+def _compute_fit_metrics(terms: dict[str, np.ndarray], coeffs: np.ndarray, rms: float) -> dict[str, float]:
+    """Derive anisotropy metrics from the fitted coefficients.
+
+    The groupings follow Eq. (8-32) – (8-44) for x/y terms and Eq. (8-48) – (8-51)
+    for skew-ray aberrations.
+    """
+
+    names = list(terms.keys())
+    a_terms = [(name, coeffs[idx]) for idx, name in enumerate(names) if name.startswith("A")]
+    b_terms = [(name, coeffs[idx]) for idx, name in enumerate(names) if name.startswith("B")]
+    c_terms = [(name, coeffs[idx]) for idx, name in enumerate(names) if name.startswith("C")]
+
+    def _rms_for(group: list[tuple[str, float]]) -> float:
+        if not group:
+            return 0.0
+        wave = sum(coeff * terms[name] for name, coeff in group)
+        return float(np.sqrt(np.mean(wave**2)))
+
+    rms_x = _rms_for(a_terms)
+    rms_y = _rms_for(b_terms)
+    rms_ratio = rms_x / rms_y if rms_y else float("inf")
+
+    idx_map = {name: coeffs[idx] for idx, name in enumerate(names)}
+    coma_ratio = float(abs(idx_map.get("A4_coma_x", 0.0)) / abs(idx_map.get("B3_coma_y", 1e-12)))
+
+    skew_strength = math.sqrt(sum(value**2 for _, value in c_terms))
+    skew_ratio = skew_strength / rms if rms else 0.0
+
+    return {
+        "rms_x": rms_x,
+        "rms_y": rms_y,
+        "rms_ratio_xy": rms_ratio,
+        "coma_ratio_ax_bx": coma_ratio,
+        "skew_relative_strength": skew_ratio,
+    }

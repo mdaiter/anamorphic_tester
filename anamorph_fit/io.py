@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,7 @@ class PupilData(BaseModel):
     wavefront: np.ndarray = Field(...)
     wavelength_nm: float = 550.0
     units: str = "waves"
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = dict(arbitrary_types_allowed=True)
 
@@ -31,13 +34,68 @@ class PupilData(BaseModel):
         return np.asarray(value, dtype=float)
 
 
-def parse_quadoa_export(path: str | Path) -> PupilData:
-    """Parse a Quadoa export file (JSON or CSV) into normalized pupil data."""
+def parse_quadoa_export(
+    source: str | Path | dict | None = None,
+    *,
+    lens_id: str | None = None,
+    field_angle: float | None = None,
+    base_url: str | None = None,
+) -> PupilData:
+    """Return a :class:`PupilData` instance sourced from Quadoa exports or API.
 
-    path = Path(path)
-    if path.suffix.lower() == ".json":
-        return _parse_json(path)
-    return _parse_csv(path)
+    The logic follows the wavefront interface described in
+    ``docs/quadoa_api/wavefront_export.html``.  When ``lens_id`` and
+    ``field_angle`` are provided the :class:`~quadoa.client.QuadoaClient`
+    is used to request the live endpoint; otherwise ``source`` may point to a
+    JSON/CSV export on disk.
+    """
+
+    from quadoa.client import QuadoaClient
+
+    if lens_id is not None:
+        if field_angle is None:
+            raise ValueError("`field_angle` must be provided when `lens_id` is used")
+        client = QuadoaClient(base_url)
+        data = client.fetch_wavefront(lens_id, float(field_angle))
+    elif isinstance(source, dict):
+        data = QuadoaClient._normalise_wavefront_payload(source)
+    elif source is not None:
+        path = Path(source)
+        if path.suffix.lower() == ".json":
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            data = QuadoaClient._normalise_wavefront_payload(raw)
+        else:
+            pupil = _parse_csv(path)
+            data = {
+                "x": pupil.x,
+                "y": pupil.y,
+                "wavefront": pupil.wavefront,
+                "wavelength_nm": pupil.wavelength_nm,
+                "units": pupil.units,
+                "metadata": pupil.metadata,
+            }
+    else:
+        raise ValueError("Either `source` or (`lens_id`, `field_angle`) must be provided")
+
+    metrics = _compute_anamorphic_metrics(data["x"], data["y"], data["wavefront"])
+    metadata = dict(data.get("metadata", {}))
+    metadata["anamorphic_metrics"] = metrics
+
+    LOGGER = logging.getLogger(__name__)
+    LOGGER.info(
+        "Computed anamorphic metrics: ratio=%.3f skew=%.3f deg",
+        metrics["anamorphic_ratio"],
+        math.degrees(metrics["principal_axis_skew"]),
+    )
+
+    return PupilData(
+        x=np.asarray(data["x"], dtype=float),
+        y=np.asarray(data["y"], dtype=float),
+        wavefront=np.asarray(data["wavefront"], dtype=float),
+        wavelength_nm=float(data["wavelength_nm"]),
+        units=str(data["units"]),
+        metadata=metadata,
+    )
 
 
 def _parse_json(path: Path) -> PupilData:
@@ -133,3 +191,28 @@ def _normalize_axis(values: np.ndarray) -> np.ndarray:
         return np.zeros_like(values)
     scale = 2.0 / (vmax - vmin)
     return (values - vmin) * scale - 1.0
+
+
+def _compute_anamorphic_metrics(x: np.ndarray, y: np.ndarray, wavefront: np.ndarray) -> dict[str, float]:
+    """Compute simple anisotropy metrics used by the CLI."""
+
+    x_range = float(np.max(x) - np.min(x))
+    y_range = float(np.max(y) - np.min(y))
+    anamorphic_ratio = x_range / y_range if y_range else float("inf")
+
+    if min(wavefront.shape) < 2:
+        mean_dx = mean_dy = 0.0
+    else:
+        edge_order = 1 if min(wavefront.shape) <= 2 else 2
+        grad_y, grad_x = np.gradient(wavefront, y, x, edge_order=edge_order)
+        mean_dx = float(np.mean(grad_x))
+        mean_dy = float(np.mean(grad_y))
+    principal_axis_skew = math.atan2(mean_dy, mean_dx)
+
+    rms = float(np.sqrt(np.mean(wavefront**2)))
+
+    return {
+        "anamorphic_ratio": anamorphic_ratio,
+        "principal_axis_skew": principal_axis_skew,
+        "wavefront_rms": rms,
+    }

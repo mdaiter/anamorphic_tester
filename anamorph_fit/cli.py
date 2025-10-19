@@ -11,8 +11,9 @@ from typing import Sequence
 import numpy as np
 
 from .basis import ABERRATION_NAMES, basis_terms_full, orthogonality_matrix
-from .fit import FitResult, fit_from_file
-from .io import parse_quadoa_export
+from .fit import FitResult, fit_aberrations_full
+from .io import PupilData, parse_quadoa_export
+from quadoa.client import QuadoaClient
 
 __all__ = ["main"]
 
@@ -21,89 +22,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.verbose:
-        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
-    elif args.log_level:
-        logging.basicConfig(level=getattr(logging, args.log_level.upper()), format="%(levelname)s:%(name)s:%(message)s")
-    else:
-        logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
+    log_level = logging.DEBUG if args.verbose else getattr(logging, args.log_level.upper(), logging.INFO)
+    logging.basicConfig(level=log_level, format="%(levelname)s:%(name)s:%(message)s")
 
-    try:
-        result = fit_from_file(args.file)
-    except Exception as exc:  # pragma: no cover - defensive
-        parser.exit(2, f"error: failed to fit '{args.file}': {exc}\n")
-
-    payload = _result_to_json_ready(result)
-
-    if args.json:
-        print(json.dumps(payload, indent=2))
-    else:
-        print(_format_report(result, args.file))
-
-    if args.export_json:
-        args.export_json.parent.mkdir(parents=True, exist_ok=True)
-        args.export_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
-    show_plots = args.plot
-    if args.plot or args.save_plot:
-        _plot_residual(
-            args.file,
-            result,
-            show=show_plots,
-            save_path=args.save_plot,
-        )
-
-    if args.basis == "heatmap":
-        basis_save = _basis_save_path(args.save_plot)
-        basis_show = args.plot or (args.save_plot is None)
-        _plot_basis_heatmap(
-            args.file,
-            result,
-            show=basis_show,
-            save_path=basis_save,
-        )
-
-    return 0
+    if args.command == "analyze":
+        return _cmd_analyze(args)
+    if args.command == "metrics":
+        return _cmd_metrics(args)
+    if args.command == "dump-schema":
+        return _cmd_dump_schema(args)
+    parser.error("Unknown command")
+    return 2
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anamorph_fit",
-        description="Fit anamorphic aberration coefficients from Quadoa exports.",
-    )
-    parser.add_argument("file", type=Path, help="Path to Quadoa CSV or JSON export.")
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        default=False,
-        help="Emit fit results as JSON.",
-    )
-    parser.add_argument(
-        "--export-json",
-        type=Path,
-        help="Write fit results JSON to the specified file.",
-    )
-    parser.add_argument(
-        "--plot",
-        action="store_true",
-        default=False,
-        help="Display residual heatmap.",
-    )
-    parser.add_argument(
-        "--save-plot",
-        type=Path,
-        help="Save the residual heatmap to an image file.",
-    )
-    parser.add_argument(
-        "--basis",
-        choices=("none", "heatmap"),
-        default="none",
-        help="Generate additional basis diagnostics (e.g. 'heatmap').",
+        description="Analyze Quadoa wavefront exports using Eq. (8-32)–(8-51) basis.",
     )
     parser.add_argument(
         "--log-level",
-        choices=("debug", "info", "warning", "error", "critical"),
-        help="Set logging level (overrides default INFO).",
+        default="info",
+        help="Set logging level (debug, info, warning, error, critical).",
     )
     parser.add_argument(
         "-v",
@@ -111,6 +51,38 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable verbose (DEBUG) logging.",
     )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    analyze = subparsers.add_parser(
+        "analyze",
+        help="Fetch a Quadoa wavefront and fit Eq. (8-32)–(8-51) coefficients",
+    )
+    analyze.add_argument("--lens", required=True, help="Lens identifier (Quadoa API)")
+    analyze.add_argument("--field", type=float, required=True, help="Field angle in degrees")
+    analyze.add_argument("--base-url", help="REST endpoint or local directory")
+    analyze.add_argument("--export-json", type=Path, help="Write fit results to JSON file")
+    analyze.add_argument("--plot", action="store_true", help="Display residual heatmap")
+    analyze.add_argument("--save-plot", type=Path, help="Save residual heatmap image")
+    analyze.add_argument(
+        "--basis",
+        choices=("none", "heatmap"),
+        default="none",
+        help="Render basis correlation heatmap",
+    )
+
+    metrics = subparsers.add_parser(
+        "metrics",
+        help="Compute anamorphic metrics for an exported wavefront",
+    )
+    metrics.add_argument("--input", type=Path, required=True, help="Path to Quadoa wavefront JSON/CSV")
+    metrics.add_argument("--json", action="store_true", help="Print metrics as JSON")
+
+    dump = subparsers.add_parser(
+        "dump-schema",
+        help="Print schema parsed from docs/quadoa_api",
+    )
+
     return parser
 
 
@@ -119,10 +91,11 @@ def _result_to_json_ready(result: FitResult) -> dict[str, object]:
         "names": list(result.names),
         "values": np.asarray(result.values, dtype=float).tolist(),
         "rms_error": float(result.rms_error),
+        "metrics": result.metrics,
     }
 
 
-def _format_report(result: FitResult, source: Path) -> str:
+def _format_report(result: FitResult, source: str) -> str:
     header = f"{'Aberration':<20}{'Coefficient':>14}"
     divider = "-" * len(header)
     lines = [
@@ -138,11 +111,15 @@ def _format_report(result: FitResult, source: Path) -> str:
             f"{'RMS error':<20}{result.rms_error:>14.6e}",
         ]
     )
+    lines.append(divider)
+    lines.append("Metrics:")
+    for key, value in result.metrics.items():
+        lines.append(f"  {key}: {value:.6e}" if isinstance(value, float) else f"  {key}: {value}")
     return "\n".join(lines)
 
 
 def _plot_residual(
-    path: Path,
+    pupil: PupilData,
     result: FitResult,
     *,
     show: bool,
@@ -153,7 +130,6 @@ def _plot_residual(
     except ImportError as exc:  # pragma: no cover - optional dependency path
         raise SystemExit("matplotlib is required for plotting") from exc
 
-    pupil = parse_quadoa_export(path)
     X, Y = np.meshgrid(pupil.x, pupil.y, indexing="xy")
     basis = basis_terms_full(X, Y)
     stack = np.stack([basis[name] for name in result.names], axis=0)
@@ -186,8 +162,7 @@ def _plot_residual(
 
 
 def _plot_basis_heatmap(
-    path: Path,
-    result: FitResult,
+    pupil: PupilData,
     *,
     show: bool,
     save_path: Path | None,
@@ -197,7 +172,6 @@ def _plot_basis_heatmap(
     except ImportError as exc:  # pragma: no cover - optional dependency path
         raise SystemExit("matplotlib is required for plotting") from exc
 
-    pupil = parse_quadoa_export(path)
     X, Y = np.meshgrid(pupil.x, pupil.y, indexing="xy")
     normalized = orthogonality_matrix(X, Y)
 
@@ -227,3 +201,62 @@ def _basis_save_path(path: Path | None) -> Path | None:
     suffix = path.suffix or ".png"
     stem = f"{path.stem}_basis"
     return path.with_name(stem + suffix)
+
+
+def _cmd_analyze(args: argparse.Namespace) -> int:
+    pupil = parse_quadoa_export(
+        lens_id=args.lens,
+        field_angle=args.field,
+        base_url=args.base_url,
+    )
+
+    X, Y = np.meshgrid(pupil.x, pupil.y, indexing="xy")
+    result = fit_aberrations_full(X, Y, pupil.wavefront)
+
+    payload = _result_to_json_ready(result)
+    payload["metadata"] = pupil.metadata
+
+    print(_format_report(result, f"lens={args.lens} field={args.field:.2f}"))
+
+    if args.export_json:
+        args.export_json.parent.mkdir(parents=True, exist_ok=True)
+        args.export_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    if args.plot or args.save_plot:
+        _plot_residual(pupil, result, show=args.plot, save_path=args.save_plot)
+
+    if args.basis == "heatmap":
+        basis_path = _basis_save_path(args.save_plot)
+        _plot_basis_heatmap(pupil, show=args.plot or basis_path is None, save_path=basis_path)
+
+    system = QuadoaClient(args.base_url).fetch_system(args.lens)
+    LOGGER = logging.getLogger(__name__)
+    LOGGER.info("System metadata surfaces=%s anamorphic=%s", system.get("surface_count"), system.get("anamorphic_ratio"))
+    return 0
+
+
+def _cmd_metrics(args: argparse.Namespace) -> int:
+    pupil = parse_quadoa_export(args.input)
+    X, Y = np.meshgrid(pupil.x, pupil.y, indexing="xy")
+    result = fit_aberrations_full(X, Y, pupil.wavefront)
+
+    metrics = dict(pupil.metadata.get("anamorphic_metrics", {}))
+    metrics.update(result.metrics)
+
+    if args.json:
+        print(json.dumps(metrics, indent=2, sort_keys=True))
+    else:
+        print("Anamorphic metrics (Eq. 8-32–8-51):")
+        for key, value in metrics.items():
+            print(f"  {key}: {value:.6e}" if isinstance(value, float) else f"  {key}: {value}")
+    return 0
+
+
+def _cmd_dump_schema(args: argparse.Namespace) -> int:
+    schema_path = Path(__file__).resolve().parents[1] / "generated" / "quadoa_schema.json"
+    if not schema_path.exists():
+        raise SystemExit("Schema not found; run tools/extract_quadoa_schema.py")
+
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    print(json.dumps(schema, indent=2, sort_keys=True))
+    return 0

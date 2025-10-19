@@ -1,48 +1,50 @@
-"""CLI smoke tests."""
+"""CLI smoke tests for the anamorphic analyzer."""
+
+from __future__ import annotations
 
 import json
 import subprocess
 import sys
-
-import numpy as np
-import pytest
 from pathlib import Path
 
-
-def _write_flat_csv(path: Path) -> None:
-    xs = np.linspace(-1.0, 1.0, 5)
-    ys = np.linspace(-1.0, 1.0, 5)
-    rows = ["x,y,wavefront"]
-    for y in ys:
-        for x in xs:
-            rows.append(f"{x},{y},0.0")
-    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+import numpy as np
 
 
-def test_cli_json(tmp_path):
-    pytest.importorskip("pandas")
+def _write_wavefront_export(tmp_path: Path) -> Path:
+    x = np.linspace(-1.0, 1.0, 5).tolist()
+    y = np.linspace(-0.5, 0.5, 4).tolist()
+    wavefront = (np.outer(np.linspace(0.05, -0.05, 4), np.linspace(0.1, -0.1, 5))).tolist()
 
-    path = tmp_path / "d.csv"
-    _write_flat_csv(path)
+    payload = {
+        "metadata": {
+            "wavelength_nm": 550.0,
+            "units": "micrometers",
+            "export_type": "wavefront",
+        },
+        "wavefront": {
+            "x": x,
+            "y": y,
+            "opd": wavefront,
+            "units": "micrometers",
+        },
+    }
 
-    result = subprocess.run(
-        [sys.executable, "-m", "anamorph_fit", str(path), "--json"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    path = tmp_path / "L001_field30.00.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
-    payload = json.loads(result.stdout)
-    assert "names" in payload
-    assert "values" in payload
-    assert "rms_error" in payload
+    system = {
+        "system": {
+            "lens_id": "L001",
+            "surface_count": 12,
+            "anamorphic_ratio": 1.2,
+        }
+    }
+    (tmp_path / "L001_system.json").write_text(json.dumps(system), encoding="utf-8")
+    return path
 
 
-def test_cli_export_json(tmp_path):
-    pytest.importorskip("pandas")
-
-    path = tmp_path / "d.csv"
-    _write_flat_csv(path)
+def test_cli_analyze_local(tmp_path):
+    _write_wavefront_export(tmp_path)
     out = tmp_path / "result.json"
 
     subprocess.run(
@@ -50,7 +52,15 @@ def test_cli_export_json(tmp_path):
             sys.executable,
             "-m",
             "anamorph_fit",
-            str(path),
+            "--log-level",
+            "warning",
+            "analyze",
+            "--lens",
+            "L001",
+            "--field",
+            "30",
+            "--base-url",
+            str(tmp_path),
             "--export-json",
             str(out),
         ],
@@ -59,35 +69,45 @@ def test_cli_export_json(tmp_path):
         text=True,
     )
 
-    data = json.loads(out.read_text())
-    assert "names" in data
-    assert "values" in data
+    payload = json.loads(out.read_text())
+    assert "metrics" in payload
+    assert payload["metrics"]["rms_ratio_xy"] >= 0
 
 
-def test_cli_basis_save(tmp_path):
-    pytest.importorskip("pandas")
-    pytest.importorskip("matplotlib.pyplot")
+def test_cli_metrics(tmp_path):
+    wf_path = _write_wavefront_export(tmp_path)
 
-    path = tmp_path / "d.csv"
-    _write_flat_csv(path)
-    image = tmp_path / "residual.png"
-
-    subprocess.run(
+    subprocess_result = subprocess.run(
         [
             sys.executable,
             "-m",
             "anamorph_fit",
-            str(path),
-            "--save-plot",
-            str(image),
-            "--basis",
-            "heatmap",
+            "metrics",
+            "--input",
+            str(wf_path),
+            "--json",
         ],
         check=True,
         capture_output=True,
         text=True,
     )
 
-    assert image.exists()
-    basis_image = image.with_name(f"{image.stem}_basis{image.suffix}")
-    assert basis_image.exists()
+    metrics = json.loads(subprocess_result.stdout)
+    assert metrics["anamorphic_ratio"] > 1
+    assert "skew_relative_strength" in metrics
+
+
+def test_cli_dump_schema(tmp_path, monkeypatch):
+    schema_dir = Path("generated")
+    schema_dir.mkdir(exist_ok=True)
+    schema_file = schema_dir / "quadoa_schema.json"
+    schema_file.write_text(json.dumps({"wavefront": {"fields": []}}), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "anamorph_fit", "dump-schema"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "wavefront" in result.stdout
