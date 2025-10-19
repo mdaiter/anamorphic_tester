@@ -30,18 +30,6 @@ class PupilData(BaseModel):
             return value
         return np.asarray(value, dtype=float)
 
-    @field_validator("wavefront")
-    @classmethod
-    def _validate_shape(cls, wavefront: np.ndarray, info: Any) -> np.ndarray:
-        x = info.data.get("x")
-        y = info.data.get("y")
-        if x is None or y is None:
-            return wavefront
-        expected = (np.size(np.unique(y)), np.size(np.unique(x)))
-        if wavefront.shape != expected:
-            raise ValueError(f"wavefront shape {wavefront.shape} expected {expected}")
-        return wavefront
-
 
 def parse_quadoa_export(path: str | Path) -> PupilData:
     """Parse a Quadoa export file (JSON or CSV) into normalized pupil data."""
@@ -55,7 +43,7 @@ def parse_quadoa_export(path: str | Path) -> PupilData:
 def _parse_json(path: Path) -> PupilData:
     payload = json.loads(path.read_text(encoding="utf-8"))
     pupil = payload.get("pupil", {})
-    meta = payload.get("meta", {})
+    meta = payload.get("meta") or payload.get("metadata", {})
 
     x = np.asarray(pupil.get("x", []), dtype=float)
     y = np.asarray(pupil.get("y", []), dtype=float)
@@ -63,16 +51,28 @@ def _parse_json(path: Path) -> PupilData:
     if wavefront.ndim != 2:
         raise ValueError("wavefront must be a 2D array in JSON exports")
 
+    ny, nx = wavefront.shape
+
+    if x.size != nx:
+        if x.size > 1:
+            x = np.linspace(x.min(), x.max(), nx)
+        else:
+            x = np.linspace(-1.0, 1.0, nx)
+    if y.size != ny:
+        if y.size > 1:
+            y = np.linspace(y.min(), y.max(), ny)
+        else:
+            y = np.linspace(-1.0, 1.0, ny)
+
     x_norm = _normalize_axis(x)
     y_norm = _normalize_axis(y)
 
     units_raw = str(meta.get("units", "waves")).lower()
+    wavelength_nm = float(meta.get("wavelength_nm", 550.0))
     if units_raw in {"micrometer", "micrometers", "micron", "microns"}:
-        wavelength_nm = 550.0
         wavefront = wavefront / (wavelength_nm * 1e-3)
         units = "waves"
     else:
-        wavelength_nm = float(meta.get("wavelength_nm", 550.0))
         units = units_raw or "waves"
 
     return PupilData(
@@ -133,4 +133,3 @@ def _normalize_axis(values: np.ndarray) -> np.ndarray:
         return np.zeros_like(values)
     scale = 2.0 / (vmax - vmin)
     return (values - vmin) * scale - 1.0
-
