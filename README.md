@@ -30,20 +30,21 @@ poetry install --extras csv --extras plot  # install both
 
 ```bash
 poetry run anamorph-fit path/to/export.csv --json
-poetry run anamorph-fit path/to/export.csv --backend numpy
 poetry run anamorph-fit path/to/export.csv --plot
 poetry run anamorph-fit path/to/export.csv --export-json fit.json
 poetry run anamorph-fit path/to/export.csv --save-plot residual.png --basis heatmap
 ```
 
+> The orthonormal basis requires at least 16 pupil samples (e.g., a 4×4 grid or denser).
+
 Supported options:
 
-- `--json` prints coefficients as JSON (names, values, RMS, norms).
+- `--json` prints coefficients as JSON (names, values, RMS).
 - `--export-json PATH` writes the same payload to disk.
 - `--plot` displays a residual heatmap (requires matplotlib).
 - `--save-plot PATH` saves the residual heatmap to an image file; combine with `--basis heatmap` to also export a correlation heatmap.
 - `--basis heatmap` visualizes basis correlations to diagnose conditioning.
-- `--backend {scipy,numpy}` selects the least-squares solver.
+- `--log-level LEVEL` or `-v/--verbose` adjust CLI logging verbosity.
 
 Example data: see `examples/sample_anamorphic.csv` and `examples/sample_quadoa.json`.
 For a short walkthrough, open `examples/quickstart.md`.

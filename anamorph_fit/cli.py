@@ -10,7 +10,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .basis import ABERRATION_NAMES, _basis_terms
+from .basis import ABERRATION_NAMES, basis_terms_full, orthogonality_matrix
 from .fit import FitResult, fit_from_file
 from .io import parse_quadoa_export
 
@@ -29,7 +29,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
 
     try:
-        result = fit_from_file(args.file, backend=args.backend)
+        result = fit_from_file(args.file)
     except Exception as exc:  # pragma: no cover - defensive
         parser.exit(2, f"error: failed to fit '{args.file}': {exc}\n")
 
@@ -101,12 +101,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Generate additional basis diagnostics (e.g. 'heatmap').",
     )
     parser.add_argument(
-        "--backend",
-        choices=("scipy", "numpy"),
-        default="scipy",
-        help="Least-squares backend to use.",
-    )
-    parser.add_argument(
         "--log-level",
         choices=("debug", "info", "warning", "error", "critical"),
         help="Set logging level (overrides default INFO).",
@@ -125,8 +119,6 @@ def _result_to_json_ready(result: FitResult) -> dict[str, object]:
         "names": list(result.names),
         "values": np.asarray(result.values, dtype=float).tolist(),
         "rms_error": float(result.rms_error),
-        "column_norms": np.asarray(result.column_norms, dtype=float).tolist(),
-        "condition_number": float(result.condition_number),
     }
 
 
@@ -163,7 +155,7 @@ def _plot_residual(
 
     pupil = parse_quadoa_export(path)
     X, Y = np.meshgrid(pupil.x, pupil.y, indexing="xy")
-    basis = _basis_terms(X, Y)
+    basis = basis_terms_full(X, Y)
     stack = np.stack([basis[name] for name in result.names], axis=0)
     modeled = np.tensordot(result.values, stack, axes=1)
     residual = pupil.wavefront - modeled
@@ -207,19 +199,15 @@ def _plot_basis_heatmap(
 
     pupil = parse_quadoa_export(path)
     X, Y = np.meshgrid(pupil.x, pupil.y, indexing="xy")
-    basis = _basis_terms(X, Y)
-    matrix = np.column_stack([basis[name].ravel() for name in ABERRATION_NAMES])
-    gram = matrix.T @ matrix
-    diag = np.sqrt(np.clip(np.diag(gram), a_min=1e-12, a_max=None))
-    normalized = (matrix / diag).T @ (matrix / diag)
+    normalized = orthogonality_matrix(X, Y)
 
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(normalized, vmin=-1, vmax=1, cmap="coolwarm")
     ax.set_title("Basis Correlation Heatmap")
-    ax.set_xticks(range(len(result.names)))
-    ax.set_yticks(range(len(result.names)))
-    ax.set_xticklabels(result.names, rotation=90)
-    ax.set_yticklabels(result.names)
+    ax.set_xticks(range(len(ABERRATION_NAMES)))
+    ax.set_yticks(range(len(ABERRATION_NAMES)))
+    ax.set_xticklabels(ABERRATION_NAMES, rotation=90)
+    ax.set_yticklabels(ABERRATION_NAMES)
     fig.colorbar(im, ax=ax, label="Correlation")
     fig.tight_layout()
 

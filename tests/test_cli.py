@@ -4,14 +4,26 @@ import json
 import subprocess
 import sys
 
+import numpy as np
 import pytest
+from pathlib import Path
+
+
+def _write_flat_csv(path: Path) -> None:
+    xs = np.linspace(-1.0, 1.0, 5)
+    ys = np.linspace(-1.0, 1.0, 5)
+    rows = ["x,y,wavefront"]
+    for y in ys:
+        for x in xs:
+            rows.append(f"{x},{y},0.0")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
 def test_cli_json(tmp_path):
     pytest.importorskip("pandas")
 
     path = tmp_path / "d.csv"
-    path.write_text("x,y,wavefront\n0,0,0\n", encoding="utf-8")
+    _write_flat_csv(path)
 
     result = subprocess.run(
         [sys.executable, "-m", "anamorph_fit", str(path), "--json"],
@@ -24,15 +36,13 @@ def test_cli_json(tmp_path):
     assert "names" in payload
     assert "values" in payload
     assert "rms_error" in payload
-    assert "column_norms" in payload
-    assert "condition_number" in payload
 
 
 def test_cli_export_json(tmp_path):
     pytest.importorskip("pandas")
 
     path = tmp_path / "d.csv"
-    path.write_text("x,y,wavefront\n0,0,0\n", encoding="utf-8")
+    _write_flat_csv(path)
     out = tmp_path / "result.json"
 
     subprocess.run(
@@ -59,7 +69,7 @@ def test_cli_basis_save(tmp_path):
     pytest.importorskip("matplotlib.pyplot")
 
     path = tmp_path / "d.csv"
-    path.write_text("x,y,wavefront\n0,0,0\n", encoding="utf-8")
+    _write_flat_csv(path)
     image = tmp_path / "residual.png"
 
     subprocess.run(

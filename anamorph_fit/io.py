@@ -48,47 +48,75 @@ def parse_quadoa_export(path: str | Path) -> PupilData:
 
     path = Path(path)
     if path.suffix.lower() == ".json":
-        with path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        pupil = payload.get("pupil", {})
-        meta = payload.get("meta", {})
-        x = np.asarray(pupil.get("x", []), dtype=float)
-        y = np.asarray(pupil.get("y", []), dtype=float)
-        wavefront = np.asarray(pupil.get("wavefront", []), dtype=float)
-        wavelength = float(meta.get("wavelength_nm", 550.0))
-        units = str(meta.get("units", "waves"))
-    else:
-        try:
-            import pandas as pd
-        except ImportError as exc:  # pragma: no cover - exercised in runtime usage
-            raise ImportError(
-                "pandas is required to parse CSV exports; please install pandas"
-            ) from exc
+        return _parse_json(path)
+    return _parse_csv(path)
 
-        df = pd.read_csv(path)
-        required = {"x", "y", "wavefront"}
-        if not required.issubset(df.columns):
-            missing = ", ".join(sorted(required - set(df.columns)))
-            raise ValueError(f"CSV missing required columns: {missing}")
-        pivot = df.pivot_table(
-            values="wavefront", index="y", columns="x", sort=False
-        ).sort_index(axis=0).sort_index(axis=1)
-        x = pivot.columns.to_numpy(dtype=float)
-        y = pivot.index.to_numpy(dtype=float)
-        wavefront = pivot.to_numpy(dtype=float)
-        wavelength = 550.0
-        units = "waves"
+
+def _parse_json(path: Path) -> PupilData:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    pupil = payload.get("pupil", {})
+    meta = payload.get("meta", {})
+
+    x = np.asarray(pupil.get("x", []), dtype=float)
+    y = np.asarray(pupil.get("y", []), dtype=float)
+    wavefront = np.asarray(pupil.get("wavefront", []), dtype=float)
+    if wavefront.ndim != 2:
+        raise ValueError("wavefront must be a 2D array in JSON exports")
 
     x_norm = _normalize_axis(x)
     y_norm = _normalize_axis(y)
-    wavefront = np.asarray(wavefront, dtype=float)
+
+    units_raw = str(meta.get("units", "waves")).lower()
+    if units_raw in {"micrometer", "micrometers", "micron", "microns"}:
+        wavelength_nm = 550.0
+        wavefront = wavefront / (wavelength_nm * 1e-3)
+        units = "waves"
+    else:
+        wavelength_nm = float(meta.get("wavelength_nm", 550.0))
+        units = units_raw or "waves"
 
     return PupilData(
         x=x_norm,
         y=y_norm,
         wavefront=wavefront,
-        wavelength_nm=wavelength,
+        wavelength_nm=wavelength_nm,
         units=units,
+    )
+
+
+def _parse_csv(path: Path) -> PupilData:
+    try:
+        import pandas as pd
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "pandas is required to parse CSV exports; install with `poetry install --extras csv`."
+        ) from exc
+
+    df = pd.read_csv(path)
+    required = {"x", "y", "wavefront"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise ValueError(f"CSV missing required columns: {missing}")
+
+    pivot = (
+        df.pivot_table(values="wavefront", index="y", columns="x", sort=False)
+        .sort_index(axis=0)
+        .sort_index(axis=1)
+    )
+
+    x = pivot.columns.to_numpy(dtype=float)
+    y = pivot.index.to_numpy(dtype=float)
+    wavefront = pivot.to_numpy(dtype=float)
+
+    x_norm = _normalize_axis(x)
+    y_norm = _normalize_axis(y)
+
+    return PupilData(
+        x=x_norm,
+        y=y_norm,
+        wavefront=wavefront,
+        wavelength_nm=550.0,
+        units="waves",
     )
 
 
@@ -105,3 +133,4 @@ def _normalize_axis(values: np.ndarray) -> np.ndarray:
         return np.zeros_like(values)
     scale = 2.0 / (vmax - vmin)
     return (values - vmin) * scale - 1.0
+

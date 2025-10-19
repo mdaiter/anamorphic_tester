@@ -81,3 +81,25 @@ def test_parse_json_defaults(tmp_path):
     assert data.wavelength_nm == 550.0
     assert data.units == "waves"
     assert data.wavefront.shape == (3, 3)
+
+
+def test_micrometer_conversion(tmp_path):
+    sample = {
+        "pupil": {
+            "x": [0, 1],
+            "y": [0, 1],
+            "wavefront": [
+                [0.55, 0.0],
+                [0.0, 0.55],
+            ],
+        },
+        "meta": {"units": "micrometers"},
+    }
+    path = tmp_path / "wf_microns.json"
+    path.write_text(json.dumps(sample))
+
+    data = parse_quadoa_export(path)
+
+    np.testing.assert_allclose(data.wavefront, [[1.0, 0.0], [0.0, 1.0]])
+    assert data.units == "waves"
+    assert data.wavelength_nm == 550.0
